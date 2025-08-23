@@ -1,0 +1,26 @@
+# Blender MTL File: 'model Y.blend'
+# Material Count: 2
+
+newmtl Body
+Ns 225.000000
+Ka 1.000000 1.000000 1.000000
+Kd 0.800000 0.800000 0.800000
+Ks 0.500000 0.500000 0.500000
+Ke 0.000000 0.000000 0.000000
+Ni 1.450000
+d 1.000000
+illum 2
+map_Bump model_Y_texture\\Material_normal.png
+map_Kd model_Y_texture\\Material_color_white.png
+map_Ns model_Y_texture\\Material_roughness.png
+refl model_Y_texture\\Material_metallic.png
+
+newmtl Material.003
+Ns 323.999994
+Ka 1.000000 1.000000 1.000000
+Kd 0.800000 0.800000 0.800000
+Ks 0.500000 0.500000 0.500000
+Ke 0.000000 0.000000 0.000000
+Ni 1.000000
+d 1.000000
+illum 2
