@@ -30,12 +30,16 @@ class TelloGymProper:
         self.camera_enabled = camera_enabled
         self.last_frame = None
         
-        # Camera parameters
-        self.camera_width = 640
-        self.camera_height = 480
+        # Camera parameters - OPTIMIZED
+        self.camera_width = 320  # Reduced from 640 for better performance
+        self.camera_height = 240  # Reduced from 480 for better performance
         self.camera_fov = 60
         self.camera_near = 0.1
-        self.camera_far = 100
+        self.camera_far = 50  # Reduced from 100 for better performance
+        
+        # PERFORMANCE: Camera update control
+        self.camera_frame_skip = 3  # Only update camera every 3rd frame
+        self.camera_step_counter = 0
         
     def connect(self):
         """Initialize the gym-pybullet-drones environment"""
@@ -84,7 +88,7 @@ class TelloGymProper:
             return False
     
     def _get_camera_image(self):
-        """Capture camera image from drone's perspective using PyBullet"""
+        """Capture camera image from drone's perspective using PyBullet - OPTIMIZED"""
         if not self.camera_enabled or not self.env:
             return None
         
@@ -92,28 +96,19 @@ class TelloGymProper:
             # Get drone state
             obs = self.env._getDroneStateVector(self.drone_id)
             drone_pos = obs[0:3]
-            drone_quat = obs[3:7]  # quaternion [x, y, z, w]
+            drone_quat = obs[3:7]
             
-            # Convert quaternion to rotation matrix to get camera direction
+            # Convert quaternion to rotation matrix
             rotation_matrix = p.getMatrixFromQuaternion(drone_quat, physicsClientId=self.env.CLIENT)
             rotation_matrix = np.array(rotation_matrix).reshape(3, 3)
             
-            # Camera is mounted forward on the drone (along x-axis)
-            # Offset camera slightly forward and down from drone center
-            camera_offset = np.array([0.1, 0, -0.05])  # 10cm forward, 5cm down
+            # Camera positioning
+            camera_offset = np.array([0.1, 0, -0.05])
             camera_pos = drone_pos + rotation_matrix @ camera_offset
             
-            # FIXED: Correct camera orientation vectors
-            # Camera looks forward (positive x direction in drone frame)
-            forward_vector = rotation_matrix[:, 0]  # First column is x-axis (forward)
-            target_pos = camera_pos + forward_vector * 10  # Look 10 meters ahead
-            
-            # FIXED: Camera up vector should be world's Z-axis for level horizon
-            # This keeps the camera level regardless of drone's roll/pitch
-            up_vector = np.array([0, 0, 1])  # World Z-axis (always up)
-            
-            # Alternative: If you want the camera to roll with the drone, use:
-            # up_vector = rotation_matrix[:, 2]  # Drone's Z-axis
+            forward_vector = rotation_matrix[:, 0]
+            target_pos = camera_pos + forward_vector * 10
+            up_vector = np.array([0, 0, 1])  # Keep level horizon
             
             # Compute view matrix
             view_matrix = p.computeViewMatrix(
@@ -123,7 +118,6 @@ class TelloGymProper:
                 physicsClientId=self.env.CLIENT
             )
             
-            # Compute projection matrix
             projection_matrix = p.computeProjectionMatrixFOV(
                 fov=self.camera_fov,
                 aspect=self.camera_width / self.camera_height,
@@ -132,21 +126,19 @@ class TelloGymProper:
                 physicsClientId=self.env.CLIENT
             )
             
-            # Capture image
-            width, height, rgb_img, depth_img, seg_img = p.getCameraImage(
+            # FIXED: Capture image and handle the tuple correctly
+            width, height, rgb_img, _, _ = p.getCameraImage(
                 width=self.camera_width,
                 height=self.camera_height,
                 viewMatrix=view_matrix,
                 projectionMatrix=projection_matrix,
-                renderer=p.ER_BULLET_HARDWARE_OPENGL,  # Use hardware acceleration if available
+                renderer=p.ER_TINY_RENDERER,  # Fast rendering
                 physicsClientId=self.env.CLIENT
             )
             
-            # Convert from RGBA to RGB
+            # FIXED: Correct array conversion - rgb_img is already a list/array
             rgb_array = np.array(rgb_img, dtype=np.uint8).reshape(height, width, 4)
-            rgb_array = rgb_array[:, :, :3]  # Remove alpha channel
-            
-            return rgb_array
+            return rgb_array[:, :, :3]  # Remove alpha channel, return RGB
             
         except Exception as e:
             print(f"❌ Error capturing camera image: {e}")
@@ -173,22 +165,24 @@ class TelloGymProper:
             return 1.0 / self._get_freq()
     
     def _step_with_timing(self, action):
-        """Step simulation with real-time synchronization"""
+        """Step simulation with real-time synchronization - OPTIMIZED CAMERA"""
         if self.real_time_mode:
             step_start_time = time.time()
         
         # Step the simulation
         obs, reward, terminated, truncated, info = self.env.step(action.reshape(1, -1))
         
-        # Update camera frame if enabled
+        # OPTIMIZED: Only update camera every few frames during movement
         if self.camera_enabled:
-            self.last_frame = self._get_camera_image()
+            self.camera_step_counter += 1
+            if self.camera_step_counter >= self.camera_frame_skip:
+                self.last_frame = self._get_camera_image()
+                self.camera_step_counter = 0
 
         if self.real_time_mode:
-            # Calculate how long this step should take in real time
-            target_step_time = self._get_ctrl_timestep()
+            # OPTIMIZED: Shorter sleep time for better responsiveness
+            target_step_time = self._get_ctrl_timestep() * 0.8  # 20% faster
             
-            # Wait if we're running too fast
             elapsed = time.time() - step_start_time
             if elapsed < target_step_time:
                 time.sleep(target_step_time - elapsed)
@@ -514,13 +508,22 @@ class TelloGymProper:
         return self.last_frame
     
     def capture_fresh_frame(self):
-        """Capture a fresh camera frame immediately"""
+        """Capture a fresh camera frame immediately - OPTIMIZED"""
         if not self.camera_enabled:
             return None
         
+        # Force immediate camera update regardless of frame skip
         self.last_frame = self._get_camera_image()
+        self.camera_step_counter = 0  # Reset counter
         return self.last_frame
     
+    def set_camera_quality(self, width=320, height=240, frame_skip=3):
+        """Adjust camera quality vs performance trade-off"""
+        self.camera_width = width
+        self.camera_height = height
+        self.camera_frame_skip = frame_skip
+        print(f"📹 Camera set to {width}x{height}, updating every {frame_skip} frames")
+        
     def send_rc_control(self, left_right, forward_backward, up_down, yaw):
         """Send RC control commands (-100 to 100)"""
         if not self.env:

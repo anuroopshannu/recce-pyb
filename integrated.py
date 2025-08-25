@@ -12,18 +12,19 @@ class TelloCameraSystem:
     
     def __init__(self, tello_instance):
         self.tello = tello_instance
-        self.camera_width = 640
-        self.camera_height = 480
+        # FIXED: Get camera dimensions from the tello instance
+        self.camera_width = getattr(tello_instance, 'camera_width', 320)
+        self.camera_height = getattr(tello_instance, 'camera_height', 240)
         self.frame_count = 0
-        print("✅ Overlay system initialized.")
+        print(f"✅ Overlay system initialized for {self.camera_width}x{self.camera_height}")
 
     def add_camera_overlay(self, image):
         """Add camera overlay with drone information"""
         if image is None:
             # Return a black frame with "No Signal" message
             black_frame = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
-            cv2.putText(black_frame, "NO CAMERA SIGNAL", (150, 240), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(black_frame, "NO CAMERA SIGNAL", (50, self.camera_height//2), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             return black_frame
 
         self.frame_count += 1
@@ -39,38 +40,46 @@ class TelloCameraSystem:
             'battery': self.tello.get_battery()
         }
         
-        # Create semi-transparent overlay background
+        # Create semi-transparent overlay background - ADJUSTED for smaller resolution
+        overlay_height = min(80, self.camera_height // 3)  # Scale overlay to image size
         overlay = overlay_image.copy()
-        cv2.rectangle(overlay, (0, 0), (self.camera_width, 100), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (0, 0), (self.camera_width, overlay_height), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, overlay_image, 0.3, 0, overlay_image)
         
+        # ADJUSTED: Smaller font for smaller resolution
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.6
+        font_scale = 0.4 if self.camera_width <= 320 else 0.6  # Smaller font for low res
         color = (0, 255, 0)  # Green text
-        thickness = 2
+        thickness = 1 if self.camera_width <= 320 else 2
         
-        # Position information
-        pos_text = f"Position: ({drone_stats['x']:.1f}, {drone_stats['y']:.1f}, {drone_stats['z']:.1f})m"
-        cv2.putText(overlay_image, pos_text, (10, 25), font, font_scale, color, thickness)
+        # FIXED: Position information - proper tuple format
+        pos_text = f"Pos: ({drone_stats['x']:.1f},{drone_stats['y']:.1f},{drone_stats['z']:.1f})m"
+        cv2.putText(overlay_image, pos_text, (5, 15), font, font_scale, color, thickness)
         
-        # Flight information
-        info_text = f"Height: {drone_stats['height']:.0f}cm | Battery: {drone_stats['battery']}% | Frame: {self.frame_count}"
-        cv2.putText(overlay_image, info_text, (10, 55), font, font_scale, color, thickness)
+        # FIXED: Flight information - proper tuple format
+        info_text = f"H:{drone_stats['height']:.0f}cm|Bat:{drone_stats['battery']}%|F:{self.frame_count}"
+        cv2.putText(overlay_image, info_text, (5, 35), font, font_scale, color, thickness)
         
-        # Flight status
+        # FIXED: Flight status - proper tuple format
         status = "FLYING" if self.tello.is_flying else "GROUNDED"
-        status_color = (0, 255, 0) if self.tello.is_flying else (0, 165, 255)  # Green if flying, orange if grounded
-        cv2.putText(overlay_image, f"Status: {status}", (10, 80), font, 0.5, status_color, 1)
+        status_color = (0, 255, 0) if self.tello.is_flying else (0, 165, 255)
+        cv2.putText(overlay_image, f"Status: {status}", (5, 55), font, font_scale*0.8, status_color, thickness)
         
-        # Add crosshair in center
+        # Add crosshair in center - ADJUSTED for resolution
         center_x, center_y = self.camera_width // 2, self.camera_height // 2
-        cv2.line(overlay_image, (center_x - 20, center_y), (center_x + 20, center_y), (255, 255, 255), 2)
-        cv2.line(overlay_image, (center_x, center_y - 20), (center_x, center_y + 20), (255, 255, 255), 2)
-        cv2.circle(overlay_image, (center_x, center_y), 3, (255, 255, 255), -1)
+        cross_size = min(15, self.camera_width // 20)  # Scale crosshair
+        cv2.line(overlay_image, (center_x - cross_size, center_y), (center_x + cross_size, center_y), (255, 255, 255), 1)
+        cv2.line(overlay_image, (center_x, center_y - cross_size), (center_x, center_y + cross_size), (255, 255, 255), 1)
+        cv2.circle(overlay_image, (center_x, center_y), 2, (255, 255, 255), -1)
         
-        # TELLO FPV watermark
-        cv2.putText(overlay_image, "TELLO FPV - LIVE", (self.camera_width - 200, self.camera_height - 20), 
-                   font, 0.6, (255, 255, 255), 2)
+        # FIXED: TELLO FPV watermark - proper tuple format and bounds checking
+        watermark_x = max(5, self.camera_width - 120)
+        watermark_y = max(self.camera_height - 15, overlay_height + 15)
+        
+        # Ensure watermark position is within image bounds
+        if watermark_x < self.camera_width - 10 and watermark_y < self.camera_height - 5:
+            cv2.putText(overlay_image, "TELLO FPV", (watermark_x, watermark_y), 
+                       font, font_scale*0.7, (255, 255, 255), thickness)
         
         return overlay_image
 
@@ -218,6 +227,10 @@ def main():
         print("Failed to connect to Tello simulation")
         return
     
+    # PERFORMANCE: Set camera to balanced quality/performance mode
+    tello.set_camera_quality(width=320, height=240, frame_skip=2)  # Higher framerate
+    # For higher quality: tello.set_camera_quality(width=640, height=480, frame_skip=4)
+    
     physics_client = tello.env.CLIENT
     
     try:
@@ -225,7 +238,7 @@ def main():
         tesla_position = [4, 0, 0]
         tesla_id = load_tesla(position=tesla_position, physics_client=physics_client)
         
-        print("\n📹 Initializing FPV overlay system...")
+        print("\n📹 Initializing OPTIMIZED FPV overlay system...")
         camera_system = TelloCameraSystem(tello)
         
         # Set up PyBullet debug camera (main simulation view)
@@ -234,8 +247,8 @@ def main():
             cameraTargetPosition=[2, 0, 1], physicsClientId=physics_client
         )
         
-        print("🎯 Tello, Tesla, and FPV Camera system loaded successfully!")
-        print("📹 Using PyBullet camera system from tello_simple.py")
+        print("🎯 Tello, Tesla, and OPTIMIZED FPV Camera system loaded!")
+        print("📹 Using FAST rendering mode for better framerate")
         print("🖥️  Watch both windows: PyBullet simulation + FPV camera feed")
         
         demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system)
