@@ -1,28 +1,46 @@
 import numpy as np
 import time
+import pybullet as p
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
 from gym_pybullet_drones.envs.BaseAviary import DroneModel, Physics
 from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
-from gym_pybullet_drones.utils.enums import ObservationType, ActionType
+
+# Try to import the enums, but provide fallbacks for older versions
+try:
+    from gym_pybullet_drones.utils.enums import ObservationType, ActionType
+    HAS_ENUMS = True
+except ImportError:
+    # Older versions don't have these enums
+    HAS_ENUMS = False
+    print("Using compatibility mode for older gym-pybullet-drones version")
 
 class TelloGymProper:
     """
     DJI Tello simulation using gym-pybullet-drones
     """
     
-    def __init__(self):
+    def __init__(self, camera_enabled=False):
         self.env = None
         self.ctrl = None
         self.drone_id = 0
         self.is_flying = False
         self.target_pos = np.array([0, 0, 1])
         self.target_rpy = np.array([0, 0, 0])
-        self.real_time_mode = True  # Enable real-time simulation
+        self.real_time_mode = True
+        self.camera_enabled = camera_enabled
+        self.last_frame = None
+        
+        # Camera parameters
+        self.camera_width = 640
+        self.camera_height = 480
+        self.camera_fov = 60
+        self.camera_near = 0.1
+        self.camera_far = 100
         
     def connect(self):
         """Initialize the gym-pybullet-drones environment"""
         try:
-            # Create environment with CF2X drone - minimal parameters
+            # Simple initialization that works with older versions
             self.env = CtrlAviary(
                 drone_model=DroneModel.CF2X,
                 num_drones=1,
@@ -30,15 +48,19 @@ class TelloGymProper:
                 initial_rpys=np.array([[0, 0, 0]]),
                 physics=Physics.PYB,
                 gui=True
+                # Removed problematic parameters that don't exist in older versions
             )
             
             # Initialize PID controller
             self.ctrl = DSLPIDControl(drone_model=DroneModel.CF2X)
             
             # Reset environment
-            obs = self.env.reset()
+            obs, info = self.env.reset()
             
             print("Connected to gym-pybullet-drones environment")
+            
+            if self.camera_enabled:
+                print("✅ Camera mode enabled - using PyBullet camera")
             
             # Check which frequency attribute exists
             if hasattr(self.env, 'SIM_FREQ'):
@@ -60,6 +82,75 @@ class TelloGymProper:
             print("Make sure gym-pybullet-drones is installed:")
             print("pip install gym-pybullet-drones")
             return False
+    
+    def _get_camera_image(self):
+        """Capture camera image from drone's perspective using PyBullet"""
+        if not self.camera_enabled or not self.env:
+            return None
+        
+        try:
+            # Get drone state
+            obs = self.env._getDroneStateVector(self.drone_id)
+            drone_pos = obs[0:3]
+            drone_quat = obs[3:7]  # quaternion [x, y, z, w]
+            
+            # Convert quaternion to rotation matrix to get camera direction
+            rotation_matrix = p.getMatrixFromQuaternion(drone_quat, physicsClientId=self.env.CLIENT)
+            rotation_matrix = np.array(rotation_matrix).reshape(3, 3)
+            
+            # Camera is mounted forward on the drone (along x-axis)
+            # Offset camera slightly forward and down from drone center
+            camera_offset = np.array([0.1, 0, -0.05])  # 10cm forward, 5cm down
+            camera_pos = drone_pos + rotation_matrix @ camera_offset
+            
+            # FIXED: Correct camera orientation vectors
+            # Camera looks forward (positive x direction in drone frame)
+            forward_vector = rotation_matrix[:, 0]  # First column is x-axis (forward)
+            target_pos = camera_pos + forward_vector * 10  # Look 10 meters ahead
+            
+            # FIXED: Camera up vector should be world's Z-axis for level horizon
+            # This keeps the camera level regardless of drone's roll/pitch
+            up_vector = np.array([0, 0, 1])  # World Z-axis (always up)
+            
+            # Alternative: If you want the camera to roll with the drone, use:
+            # up_vector = rotation_matrix[:, 2]  # Drone's Z-axis
+            
+            # Compute view matrix
+            view_matrix = p.computeViewMatrix(
+                cameraEyePosition=camera_pos,
+                cameraTargetPosition=target_pos,
+                cameraUpVector=up_vector,
+                physicsClientId=self.env.CLIENT
+            )
+            
+            # Compute projection matrix
+            projection_matrix = p.computeProjectionMatrixFOV(
+                fov=self.camera_fov,
+                aspect=self.camera_width / self.camera_height,
+                nearVal=self.camera_near,
+                farVal=self.camera_far,
+                physicsClientId=self.env.CLIENT
+            )
+            
+            # Capture image
+            width, height, rgb_img, depth_img, seg_img = p.getCameraImage(
+                width=self.camera_width,
+                height=self.camera_height,
+                viewMatrix=view_matrix,
+                projectionMatrix=projection_matrix,
+                renderer=p.ER_BULLET_HARDWARE_OPENGL,  # Use hardware acceleration if available
+                physicsClientId=self.env.CLIENT
+            )
+            
+            # Convert from RGBA to RGB
+            rgb_array = np.array(rgb_img, dtype=np.uint8).reshape(height, width, 4)
+            rgb_array = rgb_array[:, :, :3]  # Remove alpha channel
+            
+            return rgb_array
+            
+        except Exception as e:
+            print(f"❌ Error capturing camera image: {e}")
+            return None
     
     def _get_freq(self):
         """Get simulation frequency"""
@@ -89,6 +180,10 @@ class TelloGymProper:
         # Step the simulation
         obs, reward, terminated, truncated, info = self.env.step(action.reshape(1, -1))
         
+        # Update camera frame if enabled
+        if self.camera_enabled:
+            self.last_frame = self._get_camera_image()
+
         if self.real_time_mode:
             # Calculate how long this step should take in real time
             target_step_time = self._get_ctrl_timestep()
@@ -260,26 +355,19 @@ class TelloGymProper:
         
         obs = self.env._getDroneStateVector(self.drone_id)
         current_pos = obs[0:3]
-        target_pos = current_pos + np.array([distance_cm/100.0, 0, 0])
+        # Use drone's yaw to calculate true forward direction
+        current_yaw = obs[9]
+        dx = np.cos(current_yaw) * (distance_cm / 100.0)
+        dy = np.sin(current_yaw) * (distance_cm / 100.0)
+        target_pos = current_pos + np.array([dx, dy, 0])
         
         # Calculate realistic duration based on distance
-        # Tello moves at ~25-40 cm/second
         duration = max(1.0, distance_cm / 30.0)  # 30 cm/second
         self._move_to_position(target_pos, duration=duration)
     
     def move_back(self, distance_cm):
         """Move back by distance in cm"""
-        if not self.env:
-            return
-            
-        print(f"Moving back {distance_cm}cm...")
-        
-        obs = self.env._getDroneStateVector(self.drone_id)
-        current_pos = obs[0:3]
-        target_pos = current_pos + np.array([-distance_cm/100.0, 0, 0])
-        
-        duration = max(1.0, distance_cm / 30.0)
-        self._move_to_position(target_pos, duration=duration)
+        self.move_forward(-distance_cm)
     
     def move_left(self, distance_cm):
         """Move left by distance in cm"""
@@ -290,24 +378,18 @@ class TelloGymProper:
         
         obs = self.env._getDroneStateVector(self.drone_id)
         current_pos = obs[0:3]
-        target_pos = current_pos + np.array([0, distance_cm/100.0, 0])
+        # Use drone's yaw to calculate true left direction
+        current_yaw = obs[9]
+        dx = -np.sin(current_yaw) * (distance_cm / 100.0)
+        dy = np.cos(current_yaw) * (distance_cm / 100.0)
+        target_pos = current_pos + np.array([dx, dy, 0])
         
         duration = max(1.0, distance_cm / 30.0)
         self._move_to_position(target_pos, duration=duration)
     
     def move_right(self, distance_cm):
         """Move right by distance in cm"""
-        if not self.env:
-            return
-            
-        print(f"Moving right {distance_cm}cm...")
-        
-        obs = self.env._getDroneStateVector(self.drone_id)
-        current_pos = obs[0:3]
-        target_pos = current_pos + np.array([0, -distance_cm/100.0, 0])
-        
-        duration = max(1.0, distance_cm / 30.0)
-        self._move_to_position(target_pos, duration=duration)
+        self.move_left(-distance_cm)
     
     def move_up(self, distance_cm):
         """Move up by distance in cm - Vertical movement is faster"""
@@ -404,13 +486,40 @@ class TelloGymProper:
         return np.random.randint(70, 100)
     
     def get_position(self):
-        """Get current position in cm"""
+        """Get current position in meters"""
         if not self.env:
-            return [0, 0, 0]
+            return np.array([0, 0, 0])
             
         obs = self.env._getDroneStateVector(self.drone_id)
-        pos = obs[0:3]
-        return [int(pos[0] * 100), int(pos[1] * 100), int(pos[2] * 100)]
+        return obs[0:3]
+    
+    def get_orientation(self):
+        """Get current orientation as a quaternion [x, y, z, w]"""
+        if not self.env:
+            return np.array([0, 0, 0, 1])
+            
+        obs = self.env._getDroneStateVector(self.drone_id)
+        return obs[3:7]
+
+    def get_camera_frame(self):
+        """Get the latest camera frame from the drone's front-facing camera."""
+        if not self.camera_enabled:
+            print("⚠️  Camera not enabled. Initialize with camera_enabled=True")
+            return None
+        
+        # If we don't have a cached frame, capture one now
+        if self.last_frame is None:
+            self.last_frame = self._get_camera_image()
+        
+        return self.last_frame
+    
+    def capture_fresh_frame(self):
+        """Capture a fresh camera frame immediately"""
+        if not self.camera_enabled:
+            return None
+        
+        self.last_frame = self._get_camera_image()
+        return self.last_frame
     
     def send_rc_control(self, left_right, forward_backward, up_down, yaw):
         """Send RC control commands (-100 to 100)"""

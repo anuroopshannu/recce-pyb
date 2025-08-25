@@ -2,291 +2,258 @@ import pybullet as p
 import pybullet_data
 import time
 import os
+import numpy as np
+import cv2
+import threading
 from tello_simple import TelloGymProper
 
-def load_tesla(position=[3, 0, 0]):
-    """Load Tesla car into the environment with correct orientation"""
+class TelloCameraSystem:
+    """A simplified system to add an overlay to a camera frame."""
+    
+    def __init__(self, tello_instance):
+        self.tello = tello_instance
+        self.camera_width = 640
+        self.camera_height = 480
+        self.frame_count = 0
+        print("✅ Overlay system initialized.")
+
+    def add_camera_overlay(self, image):
+        """Add camera overlay with drone information"""
+        if image is None:
+            # Return a black frame with "No Signal" message
+            black_frame = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
+            cv2.putText(black_frame, "NO CAMERA SIGNAL", (150, 240), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            return black_frame
+
+        self.frame_count += 1
+        overlay_image = image.copy()
+        
+        # Get stats from the Tello wrapper
+        pos = self.tello.get_position()
+        drone_stats = {
+            'x': pos[0],
+            'y': pos[1],
+            'z': pos[2],
+            'height': self.tello.get_height(),
+            'battery': self.tello.get_battery()
+        }
+        
+        # Create semi-transparent overlay background
+        overlay = overlay_image.copy()
+        cv2.rectangle(overlay, (0, 0), (self.camera_width, 100), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, overlay_image, 0.3, 0, overlay_image)
+        
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.6
+        color = (0, 255, 0)  # Green text
+        thickness = 2
+        
+        # Position information
+        pos_text = f"Position: ({drone_stats['x']:.1f}, {drone_stats['y']:.1f}, {drone_stats['z']:.1f})m"
+        cv2.putText(overlay_image, pos_text, (10, 25), font, font_scale, color, thickness)
+        
+        # Flight information
+        info_text = f"Height: {drone_stats['height']:.0f}cm | Battery: {drone_stats['battery']}% | Frame: {self.frame_count}"
+        cv2.putText(overlay_image, info_text, (10, 55), font, font_scale, color, thickness)
+        
+        # Flight status
+        status = "FLYING" if self.tello.is_flying else "GROUNDED"
+        status_color = (0, 255, 0) if self.tello.is_flying else (0, 165, 255)  # Green if flying, orange if grounded
+        cv2.putText(overlay_image, f"Status: {status}", (10, 80), font, 0.5, status_color, 1)
+        
+        # Add crosshair in center
+        center_x, center_y = self.camera_width // 2, self.camera_height // 2
+        cv2.line(overlay_image, (center_x - 20, center_y), (center_x + 20, center_y), (255, 255, 255), 2)
+        cv2.line(overlay_image, (center_x, center_y - 20), (center_x, center_y + 20), (255, 255, 255), 2)
+        cv2.circle(overlay_image, (center_x, center_y), 3, (255, 255, 255), -1)
+        
+        # TELLO FPV watermark
+        cv2.putText(overlay_image, "TELLO FPV - LIVE", (self.camera_width - 200, self.camera_height - 20), 
+                   font, 0.6, (255, 255, 255), 2)
+        
+        return overlay_image
+
+def apply_tesla_textures(tesla_body_id, physics_client=None):
+    """Apply textures to the Tesla model."""
+    texture_path = "Material_color_red.png"
+    if os.path.exists(texture_path):
+        try:
+            texture_id = p.loadTexture(texture_path, physicsClientId=physics_client)
+            p.changeVisualShape(tesla_body_id, -1, textureUniqueId=texture_id, physicsClientId=physics_client)
+            print(f"✅ Applied texture '{texture_path}' to Tesla.")
+        except Exception as e:
+            print(f"⚠️ Could not apply texture: {e}")
+
+def load_tesla(position=[3, 0, 0], physics_client=None):
+    """Load Tesla car into the environment"""
     obj_file_name = "modely.obj"
+    
+    kwargs = {'physicsClientId': physics_client} if physics_client is not None else {}
     
     if not os.path.exists(obj_file_name):
         print(f"Warning: {obj_file_name} not found. Creating simple car placeholder.")
-        # Create a simple box as Tesla placeholder
-        tesla_visual_shape_id = p.createVisualShape(
-            shapeType=p.GEOM_BOX,
-            halfExtents=[2, 1, 0.5],
-            rgbaColor=[1, 0, 0, 1]  # Red color
-        )
-        tesla_collision_shape_id = p.createCollisionShape(
-            shapeType=p.GEOM_BOX,
-            halfExtents=[2, 1, 0.5]
-        )
-        # Use normal orientation for placeholder
+        shape = p.createVisualShape(shapeType=p.GEOM_BOX, halfExtents=[2, 1, 0.5], rgbaColor=[1, 0, 0, 1], **kwargs)
+        coll = p.createCollisionShape(shapeType=p.GEOM_BOX, halfExtents=[2, 1, 0.5], **kwargs)
         orientation = p.getQuaternionFromEuler([0, 0, 0])
     else:
         print(f"Loading Tesla model from {obj_file_name}")
-        # Load the actual Tesla model
-        tesla_visual_shape_id = p.createVisualShape(
-            shapeType=p.GEOM_MESH,
-            fileName=obj_file_name,
-            meshScale=[1.0, 1.0, 1.0],
-            rgbaColor=[1.0, 1.0, 1.0, 1.0],
-            flags=p.GEOM_FORCE_CONCAVE_TRIMESH
-        )
-        tesla_collision_shape_id = p.createCollisionShape(
-            shapeType=p.GEOM_MESH,
-            fileName=obj_file_name,
-            meshScale=[1.0, 1.0, 1.0],
-            flags=p.GEOM_FORCE_CONCAVE_TRIMESH
-        )
-        # Use correct orientation from hello.py
-        orientation = p.getQuaternionFromEuler([1.5708, 0, 0])  # 90 degrees rotation on X-axis
-    
-    # Create the Tesla multibody as STATIC object (mass = 0)
-    tesla_body_id = p.createMultiBody(
-        baseMass=0,  # Static object - no physics simulation
-        baseCollisionShapeIndex=tesla_collision_shape_id,
-        baseVisualShapeIndex=tesla_visual_shape_id,
-        basePosition=position,
-        baseOrientation=orientation
-    )
-    
-    # Apply textures if Tesla model is loaded
-    if os.path.exists(obj_file_name):
-        apply_tesla_textures(tesla_body_id)
-    
+        shape = p.createVisualShape(shapeType=p.GEOM_MESH, fileName=obj_file_name, meshScale=[1, 1, 1], flags=p.GEOM_FORCE_CONCAVE_TRIMESH, **kwargs)
+        coll = p.createCollisionShape(shapeType=p.GEOM_MESH, fileName=obj_file_name, meshScale=[1, 1, 1], flags=p.GEOM_FORCE_CONCAVE_TRIMESH, **kwargs)
+        orientation = p.getQuaternionFromEuler([1.5708, 0, 0])
+        
+    tesla_body_id = p.createMultiBody(baseMass=0, baseCollisionShapeIndex=coll, baseVisualShapeIndex=shape, basePosition=position, baseOrientation=orientation, **kwargs)
     print(f"Loaded Tesla (static) with body ID: {tesla_body_id}")
-    print(f"Tesla orientation: [1.5708, 0, 0] (90° X-axis rotation)")
+    
+    # Apply texture if Tesla model exists
+    if os.path.exists(obj_file_name):
+        apply_tesla_textures(tesla_body_id, physics_client)
+        
     return tesla_body_id
 
-def apply_tesla_textures(tesla_body_id):
-    """Apply textures to Tesla model"""
-    texture_files = {
-        "body": "Material_color_red.png"
-    }
+def demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system):
+    """Demonstrate Tello flying with the built-in, non-blocking camera feed"""
+    print("\n=== Starting Tello + Tesla + Camera Demonstration ===")
     
-    # Get visual shape data
-    visual_data = p.getVisualShapeData(tesla_body_id)
-    print(f"Tesla has {len(visual_data)} visual shapes")
+    camera_running = threading.Event()
+    camera_running.set()
     
-    # Load textures
-    textures = {}
-    for name, filename in texture_files.items():
-        if os.path.exists(filename):
-            textures[name] = p.loadTexture(filename)
-            print(f"Loaded texture: {filename}")
-    
-    # Apply materials to Tesla parts
-    for i, shape in enumerate(visual_data):
-        link_id = shape[1]
+    def camera_thread_func():
+        """Function to run in a separate thread for continuous camera feed"""
+        window_name = "Tello FPV Camera - LIVE FEED"
+        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+        cv2.moveWindow(window_name, 50, 50)
         
-        # Apply main body texture
-        if "body" in textures:
+        print("📹 FPV camera thread started - Press 'q' to quit camera")
+        
+        while camera_running.is_set():
             try:
-                p.changeVisualShape(tesla_body_id, link_id, textureUniqueId=textures["body"])
-            except:
-                pass
+                # Get fresh frame from the Tello camera system
+                camera_image = tello.capture_fresh_frame()  # Use fresh frame method
+                
+                if camera_image is not None and camera_image.size > 0:
+                    # The image from PyBullet is RGB, convert to BGR for OpenCV
+                    bgr_image = cv2.cvtColor(camera_image, cv2.COLOR_RGB2BGR)
+                    overlay_image = camera_system.add_camera_overlay(bgr_image)
+                    cv2.imshow(window_name, overlay_image)
+                else:
+                    # Show "No Signal" frame if camera image is None
+                    no_signal_frame = camera_system.add_camera_overlay(None)
+                    cv2.imshow(window_name, no_signal_frame)
+                
+                # Check for quit key
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("📹 Camera quit requested by user")
+                    camera_running.clear()
+                    break
+                    
+            except Exception as e:
+                print(f"❌ Camera thread error: {e}")
+            
+            time.sleep(1/60) # Target ~60 FPS
+        
+        cv2.destroyAllWindows()
+        print("📹 Camera thread stopped.")
 
-def demonstrate_tello_tesla_interaction(tello, tesla_id):
-    """Demonstrate Tello flying around Tesla"""
-    print("\n=== Starting Tello + Tesla Demonstration ===")
+    # Start the camera thread
+    cam_thread = threading.Thread(target=camera_thread_func, name="CameraThread")
+    cam_thread.daemon = True
+    cam_thread.start()
     
-    # Get Tesla position for reference
-    tesla_pos = p.getBasePositionAndOrientation(tesla_id)[0]
-    print(f"Tesla position: [{tesla_pos[0]:.1f}, {tesla_pos[1]:.1f}, {tesla_pos[2]:.1f}]")
-    
-    # Tello flight demonstration
-    print(f"Tello starting height: {tello.get_height()}cm")
-    print(f"Tello battery: {tello.get_battery()}%")
-    
-    # Phase 1: Takeoff
-    tello.takeoff(target_height=1.5)
-    print(f"After takeoff: {tello.get_height()}cm")
-    
-    # Phase 2: Hover and observe Tesla
-    print("Hovering to observe Tesla...")
-    tello.hover(duration=2.0)
-    
-    # Phase 3: Fly towards Tesla
-    print("Flying towards Tesla...")
-    tello.move_forward(200)  # Move 2 meters forward towards Tesla
-    print(f"Position: {tello.get_position()}")
-    
-    # Phase 4: Circle around Tesla
-    print("Circling around Tesla...")
-    tello.move_right(100)  # Move to side
-    print(f"Position: {tello.get_position()}")
-    
-    tello.rotate_clockwise(90)  # Face Tesla
-    tello.hover(duration=1.0)
-    
-    # Move in a square pattern around Tesla
-    print("Moving in square pattern around Tesla...")
-    tello.move_forward(100)
-    tello.rotate_clockwise(90)
-    tello.move_forward(100)
-    tello.rotate_clockwise(90)
-    tello.move_forward(100)
-    tello.rotate_clockwise(90)
-    tello.move_forward(100)
-    tello.rotate_clockwise(90)  # Back to original orientation
-    
-    # Phase 5: Altitude inspection
-    print("Performing altitude inspection...")
-    tello.move_up(50)  # Go higher
-    print(f"Height: {tello.get_height()}cm")
-    tello.hover(duration=2.0)
-    
-    tello.move_down(30)  # Come down a bit
-    print(f"Height: {tello.get_height()}cm")
-    
-    # Phase 6: Return to start and land
-    print("Returning to starting position...")
-    tello.move_back(200)  # Return to start area
-    print(f"Final position: {tello.get_position()}")
-    
-    tello.hover(duration=1.0)
-    tello.land()
-    print(f"Landing complete. Final height: {tello.get_height()}cm")
-
-def animate_tesla(tesla_id):
-    """Add some subtle animation to Tesla"""
     try:
-        # Slightly rotate Tesla (like showing off the car)
-        current_pos, current_orn = p.getBasePositionAndOrientation(tesla_id)
-        new_orn = p.getQuaternionFromEuler([0, 0, 0.1])  # Small rotation
-        p.resetBasePositionAndOrientation(tesla_id, current_pos, new_orn)
+        print("📹 Camera thread started. Beginning flight maneuvers...")
+        time.sleep(2) # Give camera window time to initialize
+
+        print("🚁 Taking off...")
+        tello.takeoff(target_height=1.5)
         
-        # Wait a moment
-        time.sleep(2.0)
+        print("👀 Hovering to observe Tesla...")
+        tello.hover(duration=3.0)
         
-        # Rotate back
-        new_orn = p.getQuaternionFromEuler([0, 0, -0.1])
-        p.resetBasePositionAndOrientation(tesla_id, current_pos, new_orn)
+        print("➡️ Flying towards Tesla...")
+        tello.move_forward(250) # Move 2.5 meters
         
-        time.sleep(2.0)
+        print("🔄 Circling around Tesla...")
+        tello.rotate_clockwise(90)
+        tello.hover(duration=2.0)
+        tello.move_forward(150)
+        tello.rotate_clockwise(90)
+        tello.hover(duration=2.0)
+        tello.move_forward(250)
         
-        # Back to original
-        new_orn = p.getQuaternionFromEuler([0, 0, 0])
-        p.resetBasePositionAndOrientation(tesla_id, current_pos, new_orn)
+        print("📈 Changing altitude...")
+        tello.move_up(100)
+        tello.hover(duration=2.0)
+        tello.move_down(150)
         
-    except Exception as e:
-        print(f"Tesla animation error: {e}")
+        print("🏠 Returning to starting position...")
+        tello.rotate_clockwise(180) # Turn around
+        tello.move_forward(400) # Fly back roughly to start
+        
+        print("🛬 Landing...")
+        tello.land()
+        
+        print("✅ Mission complete! Camera will close shortly.")
+        time.sleep(3)
+
+    except KeyboardInterrupt:
+        print("\n🛑 Mission interrupted by user")
+    
+    finally:
+        # Signal the camera thread to stop and wait for it to finish
+        camera_running.clear()
+        if cam_thread.is_alive():
+            cam_thread.join(timeout=3)
+        print("Main thread finished.")
 
 def main():
     """Main integrated simulation"""
-    print("🚁🚗 Starting Tello + Tesla Integrated Simulation...")
+    print("🚁🚗📹 Starting Tello + Tesla + FPV Camera Integrated Simulation...")
     
-    # Create Tello instance (this will create its own PyBullet environment)
-    tello = TelloGymProper()
+    # Initialize Tello with camera enabled
+    tello = TelloGymProper(camera_enabled=True)
     
     if not tello.connect():
         print("Failed to connect to Tello simulation")
         return
     
-    # Get the PyBullet physics client from the Tello environment
     physics_client = tello.env.CLIENT
     
     try:
-        # Load Tesla into the same environment (static object)
         print("\nLoading Tesla into Tello environment...")
-        tesla_id = load_tesla(position=[4, 0, 0])  # Place Tesla 4 meters away
+        tesla_position = [4, 0, 0]
+        tesla_id = load_tesla(position=tesla_position, physics_client=physics_client)
         
-        # Set optimal camera position to see both objects
+        print("\n📹 Initializing FPV overlay system...")
+        camera_system = TelloCameraSystem(tello)
+        
+        # Set up PyBullet debug camera (main simulation view)
         p.resetDebugVisualizerCamera(
-            cameraDistance=8,
-            cameraYaw=45,
-            cameraPitch=-25,
-            cameraTargetPosition=[2, 0, 1],
-            physicsClientId=physics_client
+            cameraDistance=8, cameraYaw=45, cameraPitch=-25,
+            cameraTargetPosition=[2, 0, 1], physicsClientId=physics_client
         )
         
-        print("🎯 Both Tello and Tesla loaded successfully!")
-        print("Tesla is now a static object with correct orientation")
-        print("Camera positioned to view both objects")
+        print("🎯 Tello, Tesla, and FPV Camera system loaded successfully!")
+        print("📹 Using PyBullet camera system from tello_simple.py")
+        print("🖥️  Watch both windows: PyBullet simulation + FPV camera feed")
         
-        # Start the demonstration
-        demonstrate_tello_tesla_interaction(tello, tesla_id)
+        demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system)
         
         print("\n🎉 Demonstration complete!")
-        print("Tesla remains static throughout the simulation")
         
-        print("\nSimulation running... Press Ctrl+C to exit")
-        
-        # Keep simulation running for observation (Tesla stays static)
-        while True:
-            time.sleep(0.1)
-            
     except KeyboardInterrupt:
         print("\n🛑 Simulation interrupted by user")
-    
     except Exception as e:
         print(f"❌ Error during simulation: {e}")
+        import traceback
+        traceback.print_exc()
     
     finally:
         print("🔌 Disconnecting...")
+        cv2.destroyAllWindows()  # Ensure camera windows are closed
         tello.disconnect()
         print("✅ Simulation ended")
 
-def interactive_mode():
-    """Interactive mode for manual control"""
-    print("🎮 Interactive Mode - Manual Tello Control")
-    
-    tello = TelloGymProper()
-    if not tello.connect():
-        return
-    
-    # Load Tesla
-    tesla_id = load_tesla(position=[4, 0, 0])
-    
-    # Set camera
-    physics_client = tello.env.CLIENT
-    p.resetDebugVisualizerCamera(
-        cameraDistance=8, cameraYaw=45, cameraPitch=-25,
-        cameraTargetPosition=[2, 0, 1], physicsClientId=physics_client
-    )
-    
-    print("\n📋 Available Commands:")
-    print("1. takeoff() - Take off")
-    print("2. land() - Land")
-    print("3. hover(duration) - Hover for specified seconds")
-    print("4. move_forward(cm) - Move forward")
-    print("5. move_back(cm) - Move backward")
-    print("6. move_left(cm) - Move left")
-    print("7. move_right(cm) - Move right")
-    print("8. move_up(cm) - Move up")
-    print("9. move_down(cm) - Move down")
-    print("10. rotate_clockwise(degrees) - Rotate clockwise")
-    print("11. get_position() - Get current position")
-    print("12. get_height() - Get current height")
-    print("Type 'quit' to exit")
-    
-    try:
-        while True:
-            command = input("\n🚁 Enter command: ").strip()
-            
-            if command.lower() in ['quit', 'exit', 'q']:
-                break
-            
-            try:
-                # Execute the command on the tello object
-                if command:
-                    result = eval(f"tello.{command}")
-                    if result is not None:
-                        print(f"Result: {result}")
-            except Exception as e:
-                print(f"Error: {e}")
-                print("Example usage: takeoff(1.5) or move_forward(100)")
-                
-    except KeyboardInterrupt:
-        print("\n🛑 Interactive mode ended")
-    
-    finally:
-        tello.disconnect()
-
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "--interactive":
-        interactive_mode()
-    else:
-        main()
+    main()
