@@ -1,6 +1,7 @@
 import numpy as np
 import time
 import pybullet as p
+import math  # ADDED: Import math module for atan2 function
 from gym_pybullet_drones.envs.CtrlAviary import CtrlAviary
 from gym_pybullet_drones.envs.BaseAviary import DroneModel, Physics
 from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
@@ -227,6 +228,66 @@ class TelloGymProper:
             
         self.target_pos = np.array([0, 0, target_height])
         print("Takeoff complete")
+        return True
+    
+    def takeoff_facing_target(self, target_height=1.0, target_position=None):
+        """Take off while maintaining orientation toward a target position"""
+        if not self.env:
+            return False
+            
+        print("Taking off while maintaining target orientation...")
+        self.is_flying = True
+        
+        # Get current position and calculate target yaw if target is provided
+        obs = self.env._getDroneStateVector(self.drone_id)
+        start_pos = obs[0:3]
+        
+        if target_position is not None:
+            # Calculate yaw to face target throughout takeoff
+            to_target_x = target_position[0] - start_pos[0]
+            to_target_y = target_position[1] - start_pos[1]
+            target_yaw = math.atan2(to_target_y, to_target_x)
+            self.target_rpy = np.array([0, 0, target_yaw])
+        
+        # Tello takeoff sequence - realistic timing
+        freq = self._get_freq()
+        takeoff_steps = int(3.5 * freq)  # 3.5 seconds like real Tello
+        
+        for i in range(takeoff_steps):
+            # Get current observation
+            obs = self.env._getDroneStateVector(self.drone_id)
+            current_pos = obs[0:3]
+            
+            # Update yaw to face target if position is provided
+            if target_position is not None:
+                to_target_x = target_position[0] - current_pos[0]
+                to_target_y = target_position[1] - current_pos[1]
+                target_yaw = math.atan2(to_target_y, to_target_x)
+                target_rpy = np.array([0, 0, target_yaw])
+            else:
+                target_rpy = self.target_rpy
+            
+            # Smooth target height progression (faster initial climb)
+            progress = min(1.0, i / (2.5 * freq))  # Reach target in 2.5 seconds
+            # Ease-out curve for smooth landing at target height
+            smooth_progress = 1 - (1 - progress) ** 2
+            current_target_height = 0.1 + (target_height - 0.1) * smooth_progress
+            
+            target_pos = np.array([current_pos[0], current_pos[1], current_target_height])
+            
+            # Compute control action
+            action, _, _ = self.ctrl.computeControlFromState(
+                control_timestep=self._get_ctrl_timestep(),
+                state=obs,
+                target_pos=target_pos,
+                target_rpy=target_rpy
+            )
+            
+            # Step simulation with timing
+            obs, reward, terminated, truncated, info = self._step_with_timing(action)
+            
+        self.target_pos = np.array([start_pos[0], start_pos[1], target_height])
+        print("Takeoff complete - maintained target orientation")
         return True
     
     def land(self):

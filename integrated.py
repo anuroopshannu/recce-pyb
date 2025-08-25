@@ -5,6 +5,8 @@ import os
 import numpy as np
 import cv2
 import threading
+import random
+import math
 from tello_simple import TelloGymProper
 
 class TelloCameraSystem:
@@ -89,13 +91,57 @@ def apply_tesla_textures(tesla_body_id, physics_client=None):
     if os.path.exists(texture_path):
         try:
             texture_id = p.loadTexture(texture_path, physicsClientId=physics_client)
+            # FIXED: Use texture_id, not tesla_id
             p.changeVisualShape(tesla_body_id, -1, textureUniqueId=texture_id, physicsClientId=physics_client)
             print(f"✅ Applied texture '{texture_path}' to Tesla.")
         except Exception as e:
             print(f"⚠️ Could not apply texture: {e}")
 
-def load_tesla(position=[3, 0, 0], physics_client=None):
-    """Load Tesla car into the environment"""
+def generate_random_positions():
+    """Generate random positions for Tesla and drone - drone always behind Tesla"""
+    # Random Tesla position in a 10x10 meter area
+    tesla_x = random.uniform(-5, 5)
+    tesla_y = random.uniform(-5, 5)
+    tesla_z = 0  # On ground
+    
+    # Random Tesla orientation (0-360 degrees around Z-axis)
+    tesla_yaw = random.uniform(0, 2 * math.pi)
+    tesla_position = [tesla_x, tesla_y, tesla_z]
+    
+    print(f"🚗 Tesla positioned at ({tesla_x:.1f}, {tesla_y:.1f}) with rotation {math.degrees(tesla_yaw):.0f}°")
+    
+    # FIXED: Place drone behind Tesla at random distance and slight angle variation
+    # Tesla's "forward" direction based on its yaw
+    tesla_forward_x = math.cos(tesla_yaw)
+    tesla_forward_y = math.sin(tesla_yaw)
+    
+    # Place drone behind Tesla (opposite to forward direction)
+    distance = random.uniform(1, 2)  # 1-2 meters behind Tesla
+    angle_variation = random.uniform(-30, 30)  # ±30° variation from directly behind
+    angle_variation_rad = math.radians(angle_variation)
+    
+    # Calculate position behind Tesla with slight angle variation
+    behind_angle = tesla_yaw + math.pi + angle_variation_rad  # 180° + variation
+    
+    drone_x = tesla_x + distance * math.cos(behind_angle)
+    drone_y = tesla_y + distance * math.sin(behind_angle)
+    drone_z = 0.1  # Just above ground
+    
+    # FIXED: Drone always faces Tesla (same calculation, but clearer)
+    to_tesla_x = tesla_x - drone_x
+    to_tesla_y = tesla_y - drone_y
+    drone_yaw = math.atan2(to_tesla_y, to_tesla_x)
+    
+    drone_position = [drone_x, drone_y, drone_z]
+    
+    print(f"🚁 Drone positioned {distance:.1f}m behind Tesla at ({drone_x:.1f}, {drone_y:.1f})")
+    print(f"🎯 Drone facing Tesla (yaw: {math.degrees(drone_yaw):.0f}°, variation: {angle_variation:.0f}°)")
+    print(f"📏 Distance between drone and Tesla: {distance:.1f}m")
+    
+    return tesla_position, tesla_yaw, drone_position, drone_yaw
+
+def load_tesla(position=[3, 0, 0], yaw_angle=0, physics_client=None):
+    """Load Tesla car into the environment with random position and orientation"""
     obj_file_name = "modely.obj"
     
     kwargs = {'physicsClientId': physics_client} if physics_client is not None else {}
@@ -104,15 +150,17 @@ def load_tesla(position=[3, 0, 0], physics_client=None):
         print(f"Warning: {obj_file_name} not found. Creating simple car placeholder.")
         shape = p.createVisualShape(shapeType=p.GEOM_BOX, halfExtents=[2, 1, 0.5], rgbaColor=[1, 0, 0, 1], **kwargs)
         coll = p.createCollisionShape(shapeType=p.GEOM_BOX, halfExtents=[2, 1, 0.5], **kwargs)
-        orientation = p.getQuaternionFromEuler([0, 0, 0])
+        # For simple box, just use the yaw rotation
+        orientation = p.getQuaternionFromEuler([0, 0, yaw_angle])
     else:
         print(f"Loading Tesla model from {obj_file_name}")
         shape = p.createVisualShape(shapeType=p.GEOM_MESH, fileName=obj_file_name, meshScale=[1, 1, 1], flags=p.GEOM_FORCE_CONCAVE_TRIMESH, **kwargs)
         coll = p.createCollisionShape(shapeType=p.GEOM_MESH, fileName=obj_file_name, meshScale=[1, 1, 1], flags=p.GEOM_FORCE_CONCAVE_TRIMESH, **kwargs)
-        orientation = p.getQuaternionFromEuler([1.5708, 0, 0])
+        # For Tesla model, combine the model's natural rotation with the random yaw
+        orientation = p.getQuaternionFromEuler([1.5708, 0, yaw_angle])
         
     tesla_body_id = p.createMultiBody(baseMass=0, baseCollisionShapeIndex=coll, baseVisualShapeIndex=shape, basePosition=position, baseOrientation=orientation, **kwargs)
-    print(f"Loaded Tesla (static) with body ID: {tesla_body_id}")
+    print(f"Loaded Tesla (static) with body ID: {tesla_body_id} at position {position}")
     
     # Apply texture if Tesla model exists
     if os.path.exists(obj_file_name):
@@ -120,8 +168,8 @@ def load_tesla(position=[3, 0, 0], physics_client=None):
         
     return tesla_body_id
 
-def demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system):
-    """Demonstrate Tello flying with the built-in, non-blocking camera feed"""
+def demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system, tesla_pos, drone_initial_yaw):
+    """Demonstrate Tello taking off while facing Tesla with live camera feed"""
     print("\n=== Starting Tello + Tesla + Camera Demonstration ===")
     
     camera_running = threading.Event()
@@ -138,7 +186,7 @@ def demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system):
         while camera_running.is_set():
             try:
                 # Get fresh frame from the Tello camera system
-                camera_image = tello.capture_fresh_frame()  # Use fresh frame method
+                camera_image = tello.capture_fresh_frame()
                 
                 if camera_image is not None and camera_image.size > 0:
                     # The image from PyBullet is RGB, convert to BGR for OpenCV
@@ -171,39 +219,46 @@ def demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system):
     cam_thread.start()
     
     try:
-        print("📹 Camera thread started. Beginning flight maneuvers...")
+        print("📹 Camera thread started. Beginning flight demonstration...")
         time.sleep(2) # Give camera window time to initialize
 
-        print("🚁 Taking off...")
-        tello.takeoff(target_height=1.5)
+        print("🚁 Taking off while maintaining view of Tesla...")
+        # FIXED: Maintain orientation toward Tesla during takeoff
+        tello.takeoff_facing_target(target_height=1.5, target_position=tesla_pos)
         
-        print("👀 Hovering to observe Tesla...")
+        print("👀 Hovering behind Tesla with perfect view...")
+        tello.hover(duration=5.0)  # Longer hover to appreciate the view
+        
+        # Optional: Add some gentle movements while maintaining Tesla focus
+        print("📹 Demonstrating camera movement while keeping Tesla in view...")
+        
+        # Gentle movements that maintain Tesla visibility
+        print("📈 Moving up for better perspective...")
+        tello.move_up(100)  # Go higher
         tello.hover(duration=3.0)
         
-        print("➡️ Flying towards Tesla...")
-        tello.move_forward(250) # Move 2.5 meters
-        
-        print("🔄 Circling around Tesla...")
-        tello.rotate_clockwise(90)
+        print("➡️ Gentle sideways movement...")
+        tello.move_left(50)  # Move slightly left
         tello.hover(duration=2.0)
-        tello.move_forward(150)
-        tello.rotate_clockwise(90)
+        tello.move_right(100)  # Move to the right
         tello.hover(duration=2.0)
-        tello.move_forward(250)
+        tello.move_left(50)  # Return to center
         
-        print("📈 Changing altitude...")
-        tello.move_up(100)
+        print("🔄 Slight rotation while keeping Tesla in view...")
+        tello.rotate_clockwise(15)  # Small rotation
         tello.hover(duration=2.0)
-        tello.move_down(150)
+        tello.rotate_counter_clockwise(30)  # Turn to the other side
+        tello.hover(duration=2.0)
+        tello.rotate_clockwise(15)  # Return to center
         
-        print("🏠 Returning to starting position...")
-        tello.rotate_clockwise(180) # Turn around
-        tello.move_forward(400) # Fly back roughly to start
+        print("📉 Coming down...")
+        tello.move_down(50)  # Come down a bit
+        tello.hover(duration=2.0)
         
         print("🛬 Landing...")
         tello.land()
         
-        print("✅ Mission complete! Camera will close shortly.")
+        print("✅ Demonstration complete! Camera will close shortly.")
         time.sleep(3)
 
     except KeyboardInterrupt:
@@ -217,8 +272,12 @@ def demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system):
         print("Main thread finished.")
 
 def main():
-    """Main integrated simulation"""
+    """Main integrated simulation with random positioning"""
     print("🚁🚗📹 Starting Tello + Tesla + FPV Camera Integrated Simulation...")
+    print("🎲 Randomizing positions each run...")
+    
+    # Generate random positions for Tesla and drone
+    tesla_pos, tesla_yaw, drone_pos, drone_yaw = generate_random_positions()
     
     # Initialize Tello with camera enabled
     tello = TelloGymProper(camera_enabled=True)
@@ -228,30 +287,50 @@ def main():
         return
     
     # PERFORMANCE: Set camera to balanced quality/performance mode
-    tello.set_camera_quality(width=320, height=240, frame_skip=2)  # Higher framerate
-    # For higher quality: tello.set_camera_quality(width=640, height=480, frame_skip=4)
+    tello.set_camera_quality(width=320, height=240, frame_skip=2)
     
     physics_client = tello.env.CLIENT
     
     try:
-        print("\nLoading Tesla into Tello environment...")
-        tesla_position = [4, 0, 0]
-        tesla_id = load_tesla(position=tesla_position, physics_client=physics_client)
+        # Load Tesla with random position and orientation
+        print(f"\nLoading Tesla at random position: ({tesla_pos[0]:.1f}, {tesla_pos[1]:.1f})...")
+        tesla_id = load_tesla(position=tesla_pos, yaw_angle=tesla_yaw, physics_client=physics_client)
+        
+        # Set drone's initial position and orientation to face Tesla
+        print(f"Positioning drone at ({drone_pos[0]:.1f}, {drone_pos[1]:.1f}) facing Tesla...")
+        
+        # Update the drone's position in the simulation
+        # First, we need to reset the drone to the new position
+        p.resetBasePositionAndOrientation(
+            0,  # Assuming drone is body ID 0
+            drone_pos,
+            p.getQuaternionFromEuler([0, 0, drone_yaw]),
+            physicsClientId=physics_client
+        )
+        
+        # Update the tello wrapper's internal position tracking
+        tello.target_pos = np.array(drone_pos)
+        tello.target_rpy = np.array([0, 0, drone_yaw])
         
         print("\n📹 Initializing OPTIMIZED FPV overlay system...")
         camera_system = TelloCameraSystem(tello)
         
-        # Set up PyBullet debug camera (main simulation view)
+        # Set up PyBullet debug camera to show both drone and Tesla
+        # Position camera to show the scene from above and slightly to the side
+        center_x = (tesla_pos[0] + drone_pos[0]) / 2
+        center_y = (tesla_pos[1] + drone_pos[1]) / 2
+        
         p.resetDebugVisualizerCamera(
-            cameraDistance=8, cameraYaw=45, cameraPitch=-25,
-            cameraTargetPosition=[2, 0, 1], physicsClientId=physics_client
+            cameraDistance=10, cameraYaw=30, cameraPitch=-25,
+            cameraTargetPosition=[center_x, center_y, 0.5], physicsClientId=physics_client
         )
         
         print("🎯 Tello, Tesla, and OPTIMIZED FPV Camera system loaded!")
         print("📹 Using FAST rendering mode for better framerate")
         print("🖥️  Watch both windows: PyBullet simulation + FPV camera feed")
+        print(f"🎯 Drone is positioned behind Tesla and should see it clearly in FPV!")
         
-        demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system)
+        demonstrate_tello_tesla_with_camera(tello, tesla_id, camera_system, tesla_pos, drone_yaw)
         
         print("\n🎉 Demonstration complete!")
         
@@ -264,7 +343,7 @@ def main():
     
     finally:
         print("🔌 Disconnecting...")
-        cv2.destroyAllWindows()  # Ensure camera windows are closed
+        cv2.destroyAllWindows()
         tello.disconnect()
         print("✅ Simulation ended")
 
